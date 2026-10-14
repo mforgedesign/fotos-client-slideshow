@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#08090b" />
+    <title>Slideshow</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      * { box-sizing: border-box; }
+      html, body, #viewer { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #08090b; }
+      #viewer { position: fixed; inset: 0; isolation: isolate; }
+      #slideshow-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+      #status { position: absolute; inset: auto 24px 24px; z-index: 2; color: #f5f5f5; text-align: center; font-size: 14px; text-shadow: 0 1px 10px #000; pointer-events: none; }
+      #status[hidden] { display: none; }
+      #fullscreen-toggle {
+        position: absolute; z-index: 3; top: max(16px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right));
+        display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid rgb(255 255 255 / 32%);
+        border-radius: 50%; color: #fff; background: rgb(12 14 18 / 42%); backdrop-filter: blur(12px);
+        opacity: .68; cursor: pointer; transition: opacity 180ms ease, background 180ms ease;
+      }
+      #fullscreen-toggle:hover, #fullscreen-toggle:focus-visible { opacity: 1; background: rgb(12 14 18 / 76%); }
+      #fullscreen-toggle:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+      #fullscreen-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      @media (prefers-reduced-motion: reduce) { #fullscreen-toggle { transition: none; } }
+    </style>
+  </head>
+  <body>
+    <main id="viewer" aria-label="Apresentação de fotos">
+      <canvas id="slideshow-canvas" aria-label="Slideshow de fotos em reprodução contínua"></canvas>
+      <p id="status" role="status" aria-live="polite">Carregando fotos…</p>
+      <button id="fullscreen-toggle" type="button" aria-label="Ativar tela cheia" title="Tela cheia">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3" /></svg>
+      </button>
+    </main>
+    <script type="module">
+      import { createSlideshowEngine } from "./engine.js";
+      import { CONFIG } from "./runtime-data.mjs";
+
+      const viewer = document.getElementById("viewer");
+      const canvas = document.getElementById("slideshow-canvas");
+      const status = document.getElementById("status");
+      const fullscreenButton = document.getElementById("fullscreen-toggle");
+      const maxDpr = 2;
+      const sizeForViewport = () => {
+        const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+        return {
+          width: Math.max(2, Math.round(window.innerWidth * dpr)),
+          height: Math.max(2, Math.round(window.innerHeight * dpr)),
+        };
+      };
+      const dimensions = sizeForViewport();
+      const engine = await createSlideshowEngine({
+        root: viewer,
+        canvas,
+        mode: "loop",
+        ...dimensions,
+        lazyPhotos: true,
+        imageCacheSize: 4,
+      });
+
+      const cycleSeconds = CONFIG.timing.holdSeconds + CONFIG.timing.transitionSeconds;
+      let startedAt;
+      let latestTime = 0;
+      let prefetchBucket = -1;
+
+      function showError(error) {
+        status.textContent = "Não foi possível carregar uma foto. Atualize a página para tentar novamente.";
+        status.hidden = false;
+        console.error("Slideshow photo load failed", error);
+      }
+
+      function elapsedSeconds(now) {
+        return ((now - startedAt) / 1000) % engine.duration;
+      }
+
+      async function paint(now) {
+        latestTime = elapsedSeconds(now);
+        try {
+          await engine.prepareAt(latestTime);
+          const currentTime = elapsedSeconds(performance.now());
+          await engine.prepareAt(currentTime);
+          engine.renderAt(currentTime);
+          latestTime = currentTime;
+          status.hidden = true;
+
+          const bucket = Math.floor((latestTime + cycleSeconds * 1.5) / cycleSeconds);
+          if (bucket !== prefetchBucket) {
+            prefetchBucket = bucket;
+            engine.prepareAt(latestTime + cycleSeconds * 1.5).catch(showError);
+          }
+        } catch (error) {
+          showError(error);
+        }
+        window.requestAnimationFrame(paint);
+      }
+
+      function syncFullscreenButton() {
+        const fullscreen = Boolean(document.fullscreenElement);
+        fullscreenButton.setAttribute("aria-label", fullscreen ? "Sair da tela cheia" : "Ativar tela cheia");
+        fullscreenButton.title = fullscreen ? "Sair da tela cheia" : "Tela cheia";
+      }
+
+      fullscreenButton.addEventListener("click", async () => {
+        try {
+          if (document.fullscreenElement) await document.exitFullscreen();
+          else await viewer.requestFullscreen();
+        } catch (error) {
+          showError(error);
+        }
+      });
+      document.addEventListener("fullscreenchange", syncFullscreenButton);
+      window.addEventListener("resize", () => {
+        const next = sizeForViewport();
+        if (next.width === engine.width && next.height === engine.height) return;
+        engine.resize(next.width, next.height);
+        engine.prepareAt(latestTime).then(() => engine.renderAt(latestTime)).catch(showError);
+      }, { passive: true });
+
+      try {
+        await engine.prepareAt(0);
+        engine.renderAt(0);
+        status.hidden = true;
+        startedAt = performance.now();
+        engine.prepareAt(cycleSeconds * 1.5).catch(showError);
+        window.requestAnimationFrame(paint);
+      } catch (error) {
+        showError(error);
+      }
+    </script>
+  </body>
+</html>
